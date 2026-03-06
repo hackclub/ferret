@@ -223,8 +223,9 @@ get "/search.json" do
     end
   end
 
+  floor = params[:show_worse] == "1" ? 0 : RERANK_FLOOR
   scored = reranked
-    .select { |r| r[:score] > RERANK_FLOOR }
+    .select { |r| r[:score] > floor }
     .sort_by { |r| -r[:score] }
 
   ordered = scored.map do |r|
