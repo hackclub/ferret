@@ -1,0 +1,74 @@
+# frozen_string_literal: true
+
+require "sqlite3"
+require "sqlite_vec"
+
+module DB
+  DB_PATH = File.expand_path("../../data/ferret.db", __FILE__)
+  EMBED_DIM = 768 # all-mpnet-base-v2
+
+  def self.connection
+    @db ||= begin
+      db = SQLite3::Database.new(DB_PATH)
+      db.results_as_hash = true
+      db.execute("PRAGMA journal_mode=WAL")
+      db.execute("PRAGMA synchronous=NORMAL")
+      db.enable_load_extension(true)
+      SqliteVec.load(db)
+      db.enable_load_extension(false)
+      migrate(db)
+      db
+    end
+  end
+
+  def self.migrate(db)
+    db.execute(<<~SQL)
+      CREATE TABLE IF NOT EXISTS projects (
+        record_id TEXT PRIMARY KEY,
+        description TEXT,
+        description_clean TEXT,
+        playable_url TEXT,
+        code_url TEXT,
+        hours_spent REAL,
+        name TEXT,
+        country TEXT,
+        city TEXT,
+        age_when_approved INTEGER,
+        ysws_name TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    SQL
+
+    db.execute(<<~SQL)
+      CREATE TABLE IF NOT EXISTS vec_lookup (
+        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_id TEXT NOT NULL UNIQUE REFERENCES projects(record_id)
+      )
+    SQL
+
+    db.execute(<<~SQL)
+      CREATE VIRTUAL TABLE IF NOT EXISTS vec_projects USING vec0(
+        rowid INTEGER PRIMARY KEY,
+        embedding float[#{EMBED_DIM}]
+      )
+    SQL
+
+    db.execute(<<~SQL)
+      CREATE VIRTUAL TABLE IF NOT EXISTS fts_projects USING fts5(
+        record_id UNINDEXED,
+        description_clean,
+        content='',
+        tokenize='porter unicode61'
+      )
+    SQL
+  end
+
+  # strip markdown, urls, extra whitespace
+  def self.clean(text)
+    return nil if text.nil?
+    text = text.gsub(/https?:\/\/\S+/, "")
+    text = text.gsub(/[#*_`~\[\]()>|]/, "")
+    text = text.gsub(/\s+/, " ").strip
+    text
+  end
+end

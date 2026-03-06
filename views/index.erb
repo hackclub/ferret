@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ferret</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+  <header class="usn">
+    <h1>≽ܫ≼ ferret</h1>
+    <p class="subtitle">semantic search over hack club projects</p>
+  </header>
+
+  <main>
+    <div class="search-bar">
+      <input
+        type="search"
+        name="q"
+        placeholder="search for projects... (use -word to exclude)"
+        autocomplete="off"
+        hx-get="/search.json"
+        hx-trigger="input changed delay:300ms, search"
+        hx-target="#results"
+        hx-indicator="#spinner"
+        hx-include=".filter"
+      >
+      <span id="spinner" class="htmx-indicator">searching...</span>
+    </div>
+
+    <details class="filters">
+      <summary>filters</summary>
+      <div class="filter-row">
+        <input class="filter" type="text" name="country" placeholder="country" onchange="retrigger()">
+        <input class="filter" type="number" name="min_hours" placeholder="min hours" min="0" step="1" onchange="retrigger()">
+        <input class="filter" type="number" name="limit" value="20" min="1" max="100" onchange="retrigger()">
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input class="toggle-cb" type="checkbox" data-filter="exclude_zero_hours" checked><span>exclude 0h</span></label>
+        <label class="toggle"><input class="toggle-cb" type="checkbox" data-filter="use_vec" checked><span>embeddings</span></label>
+        <label class="toggle"><input class="toggle-cb" type="checkbox" data-filter="use_fts" checked><span>fulltext</span></label>
+      </div>
+      <div id="toggle-hiddens"></div>
+      <p class="filter-hint usn">click <strong>+</strong> to show only or <strong>&minus;</strong> to hide ysws programs</p>
+      <div class="ysws-filter" id="ysws-filter"></div>
+    </details>
+
+    <div id="results"></div>
+  </main>
+
+  <script>
+    // --- tag filter state ---
+    const tagContainer = document.getElementById('ysws-filter');
+    const tagState = {}; // name → 0 (neutral), 1 (include), -1 (exclude)
+    let visibleTags = [];
+    let tagCounts = {}; // name → count from current results
+    let tagFilter = '';
+
+    function renderTags() {
+      const allShown = [...new Set([
+        ...Object.keys(tagState).filter(n => tagState[n] !== 0),
+        ...visibleTags
+      ])];
+      // sort: active filters first, then by result count desc, then alpha
+      allShown.sort((a, b) => {
+        const aActive = tagState[a] ? 1 : 0;
+        const bActive = tagState[b] ? 1 : 0;
+        if (aActive !== bActive) return bActive - aActive;
+        const aC = tagCounts[a] || 0;
+        const bC = tagCounts[b] || 0;
+        if (aC !== bC) return bC - aC;
+        return a.localeCompare(b);
+      });
+
+      if (allShown.length === 0) {
+        tagContainer.innerHTML = '';
+        return;
+      }
+
+      const filtered = tagFilter
+        ? allShown.filter(n => n.toLowerCase().includes(tagFilter) || tagState[n])
+        : allShown;
+
+      const searchHtml = `<div class="tag-search">` +
+        `<input type="text" placeholder="filter programs..." value="${esc(tagFilter)}" class="tag-search-input">` +
+        (tagFilter ? `<button type="button" class="tag-search-clear">\u00d7</button>` : '') +
+        `</div>`;
+
+      const rows = filtered.map(n => {
+        const s = tagState[n] || 0;
+        return `<div class="tag-row ${s === 1 ? 'included' : s === -1 ? 'excluded' : ''}">` +
+          `<span class="tag-btns">` +
+          `<button type="button" class="tag-btn btn-q ${s === 0 ? 'active' : ''}" data-name="${esc(n)}" data-action="0">?</button>` +
+          `<button type="button" class="tag-btn btn-plus ${s === 1 ? 'active' : ''}" data-name="${esc(n)}" data-action="1">+</button>` +
+          `<button type="button" class="tag-btn btn-minus ${s === -1 ? 'active' : ''}" data-name="${esc(n)}" data-action="-1">\u2212</button>` +
+          `</span>` +
+          `<span class="tag-name">${esc(n)}</span>` +
+          (tagCounts[n] ? `<span class="tag-count">(${tagCounts[n]})</span>` : '') +
+          `</div>`;
+      }).join('');
+
+      const hiddens = Object.keys(tagState).filter(n => tagState[n] !== 0).map(n => {
+        const param = tagState[n] === 1 ? 'ysws_name' : 'ysws_exclude';
+        return `<input type="hidden" class="filter" name="${param}" value="${esc(n)}">`;
+      }).join('');
+
+      tagContainer.innerHTML = `${searchHtml}<div class="tag-list">${rows}</div>${hiddens}`;
+    }
+
+    tagContainer.addEventListener('input', function(e) {
+      if (e.target.classList.contains('tag-search-input')) {
+        tagFilter = e.target.value.toLowerCase();
+        renderTags();
+        // refocus and restore cursor
+        const input = tagContainer.querySelector('.tag-search-input');
+        input.focus();
+        input.selectionStart = input.selectionEnd = input.value.length;
+      }
+    });
+
+    tagContainer.addEventListener('click', function(e) {
+      if (e.target.classList.contains('tag-search-clear')) {
+        tagFilter = '';
+        renderTags();
+        return;
+      }
+      const btn = e.target.closest('.tag-btn');
+      if (!btn) return;
+      const name = btn.dataset.name;
+      const action = parseInt(btn.dataset.action);
+      if (action === 0) {
+        delete tagState[name];
+      } else {
+        tagState[name] = action;
+      }
+      renderTags();
+      retrigger();
+    });
+
+    // load initial tag list
+    fetch('/ysws_names.json').then(r => r.json()).then(names => {
+      visibleTags = names;
+      renderTags();
+    });
+
+    // --- search handling ---
+    document.body.addEventListener("htmx:beforeSwap", function(e) {
+      if (e.detail.xhr.status === 200) {
+        try {
+          const data = JSON.parse(e.detail.serverResponse);
+          const results = data.results || [];
+
+          // update tag counts and re-sort
+          if (data.ysws_counts) {
+            tagCounts = data.ysws_counts;
+            renderTags();
+          }
+
+          if (results.length === 0 && data.query) {
+            e.detail.serverResponse = '<p class="no-results">no results found</p>';
+          } else if (results.length === 0) {
+            e.detail.serverResponse = '';
+          } else {
+            const t = data.timings || {};
+            const parts = [];
+            if (t.embed != null) parts.push(`embed ${t.embed}ms`);
+            if (t.vec_knn != null) parts.push(`knn ${t.vec_knn}ms`);
+            if (t.fts != null) parts.push(`fts ${t.fts}ms`);
+            if (t.rerank != null) parts.push(`rerank ${t.rerank}ms`);
+            const detail = parts.length ? ` <span class="timing-detail">(${parts.join(' · ')})</span>` : '';
+            const stats = `<p class="search-stats">${results.length} results in ${data.ms}ms${detail}</p>`;
+            e.detail.serverResponse = stats + results.map(renderCard).join('');
+          }
+        } catch (err) {
+          e.detail.serverResponse = '<p class="error">something went wrong</p>';
+        }
+      }
+    });
+
+    // sync toggle checkboxes to hidden inputs so unchecked = "0" is always sent
+    function syncToggles() {
+      const container = document.getElementById('toggle-hiddens');
+      container.innerHTML = Array.from(document.querySelectorAll('.toggle-cb')).map(cb =>
+        `<input type="hidden" class="filter" name="${cb.dataset.filter}" value="${cb.checked ? '1' : '0'}">`
+      ).join('');
+    }
+    syncToggles();
+    document.querySelector('.toggle-row').addEventListener('change', function() {
+      syncToggles();
+      retrigger();
+    });
+
+    function retrigger() {
+      htmx.trigger(document.querySelector('input[name="q"]'), 'search');
+    }
+
+    function renderCard(p) {
+      const desc = (p.description_clean || '').slice(0, 200);
+      const meta = [p.name, p.age_when_approved ? `age ${p.age_when_approved}` : null,
+                    [p.city, p.country].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+      const links = [];
+      if (p.playable_url) links.push(`<a href="${schemed(p.playable_url)}" target="_blank" rel="noopener">play</a>`);
+      if (p.code_url) links.push(`<a href="${schemed(p.code_url)}" target="_blank" rel="noopener">code</a>`);
+      if (p.record_id) links.push(`<a href="https://airtable.com/app3A5kJwYqxMLOgh/tblzWWGUYHVH7Zyqf/${esc(p.record_id)}" target="_blank" rel="noopener">airtable</a>`);
+      const hours = p.hours_spent ? `${p.hours_spent}h` : '';
+      const ysws = p.ysws_name ? `<span class="tag">${esc(p.ysws_name)}</span>` : '';
+      const score = p.score != null ? `<span class="score">${p.score.toFixed(2)}</span>` : '';
+
+      return `<article class="card">
+        <p class="desc">${esc(desc)}${desc.length >= 200 ? '…' : ''}</p>
+        <div class="card-meta">
+          <span class="meta">${esc(meta)}</span>
+          ${ysws}
+          ${hours ? `<span class="hours">${hours}</span>` : ''}
+          ${score}
+          <span class="links">${links.join(' ')}</span>
+        </div>
+      </article>`;
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s || '';
+      return d.innerHTML;
+    }
+
+    function schemed(url) {
+      url = url.trim();
+      if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+      return esc(url);
+    }
+  </script>
+</body>
+</html>

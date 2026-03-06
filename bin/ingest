@@ -1,0 +1,83 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "csv"
+require_relative "../lib/db"
+
+csv_path = ARGV[0] || File.expand_path("../../data/unified.csv", __FILE__)
+abort "CSV not found: #{csv_path}" unless File.exist?(csv_path)
+
+db = DB.connection
+EN_DASH = "\u2013"
+BATCH = 500
+MIN_CLEAN_LEN = 50
+
+upsert_sql = <<~SQL
+  INSERT INTO projects (record_id, description, description_clean, playable_url, code_url,
+                        hours_spent, name, country, city, age_when_approved, ysws_name, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  ON CONFLICT(record_id) DO UPDATE SET
+    description = excluded.description,
+    description_clean = CASE WHEN excluded.description_clean != projects.description_clean
+                             THEN excluded.description_clean ELSE projects.description_clean END,
+    playable_url = excluded.playable_url,
+    code_url = excluded.code_url,
+    hours_spent = excluded.hours_spent,
+    name = excluded.name,
+    country = excluded.country,
+    city = excluded.city,
+    age_when_approved = excluded.age_when_approved,
+    ysws_name = excluded.ysws_name,
+    updated_at = CASE WHEN excluded.description_clean != projects.description_clean
+                      THEN datetime('now') ELSE projects.updated_at END
+SQL
+
+total = 0
+skipped = 0
+ingested = 0
+batch = []
+
+flush = -> {
+  return if batch.empty?
+  db.transaction do
+    batch.each { |row| db.execute(upsert_sql, row) }
+  end
+  batch.clear
+}
+
+CSV.foreach(csv_path, headers: true, liberal_parsing: true) do |row|
+  total += 1
+
+  record_id = row["Record ID"]
+  next (skipped += 1) unless record_id && !record_id.empty?
+
+  description = row["Description"]
+  clean = DB.clean(description)
+  next (skipped += 1) if clean.nil? || clean.length < MIN_CLEAN_LEN
+
+  id_field = row["ID"] || ""
+  parts = id_field.split(EN_DASH, 2)
+  ysws_name = parts[0]&.strip
+  name = parts[1]&.strip
+
+  hours = row["Hours Spent"]&.to_f
+  age = row["Age When Approved"]&.to_i
+
+  batch << [record_id, description, clean, row["Playable URL"], row["Code URL"],
+            hours, name, row["Country"], row["City"], age == 0 ? nil : age, ysws_name]
+
+  if batch.size >= BATCH
+    ingested += batch.size
+    flush.call
+  end
+
+  if total % 5000 == 0
+    $stderr.print "\r  #{total} rows scanned, #{ingested + batch.size} ingested, #{skipped} skipped"
+  end
+end
+
+# count before final flush
+ingested += batch.size
+flush.call
+
+$stderr.puts "\r  done: #{total} rows scanned, #{ingested} ingested, #{skipped} skipped"

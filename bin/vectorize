@@ -1,0 +1,56 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "informers"
+require_relative "../lib/db"
+
+if ARGV.include?("--rebuild")
+  puts "rebuilding vector + fts indexes..."
+  db = DB.connection
+  db.execute("DROP TABLE IF EXISTS vec_projects")
+  db.execute("DROP TABLE IF EXISTS fts_projects")
+  db.execute("DELETE FROM vec_lookup")
+  DB.migrate(db)
+end
+
+db = DB.connection
+model = Informers.pipeline("embedding", "sentence-transformers/all-mpnet-base-v2")
+
+BATCH_SIZE = 64
+
+# find rows not yet vectorized
+rows = db.execute(<<~SQL)
+  SELECT p.record_id, p.description_clean
+  FROM projects p
+  LEFT JOIN vec_lookup v ON v.record_id = p.record_id
+  WHERE v.rowid IS NULL AND p.description_clean IS NOT NULL
+  ORDER BY p.rowid
+SQL
+
+puts "#{rows.size} rows to embed"
+exit 0 if rows.empty?
+
+rows.each_slice(BATCH_SIZE).with_index do |batch, i|
+  texts = batch.map { |r| r["description_clean"] }
+  embeddings = model.(texts)
+
+  db.transaction do
+    batch.each_with_index do |row, j|
+      embedding = embeddings[j]
+      blob = embedding.pack("e*")
+
+      db.execute("INSERT OR IGNORE INTO vec_lookup (record_id) VALUES (?)", [row["record_id"]])
+      rowid = db.execute("SELECT rowid FROM vec_lookup WHERE record_id = ?", [row["record_id"]]).first["rowid"]
+
+      db.execute("INSERT INTO vec_projects (rowid, embedding) VALUES (?, ?)", [rowid, blob])
+      db.execute("INSERT INTO fts_projects (rowid, record_id, description_clean) VALUES (?, ?, ?)",
+                 [rowid, row["record_id"], row["description_clean"]])
+    end
+  end
+
+  done = (i + 1) * BATCH_SIZE
+  done = rows.size if done > rows.size
+  $stderr.print "\r  embedded #{done}/#{rows.size}"
+end
+
+$stderr.puts "\r  done: embedded #{rows.size} rows"
