@@ -1,0 +1,16 @@
+#!/bin/sh
+# download fresh CSV, ingest into sqlite, vectorize new rows
+set -e
+
+cd "$(dirname "$0")/.."
+
+echo "[refresh] downloading csv..."
+bundle exec ruby bin/download
+
+echo "[refresh] ingesting..."
+bundle exec ruby bin/ingest
+
+echo "[refresh] vectorizing..."
+bundle exec ruby bin/vectorize
+
+echo "[refresh] done"

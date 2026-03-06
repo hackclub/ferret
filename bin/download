@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "scaretable"
+require "open-uri"
+
+base_id  = ENV.fetch("SCARETABLE_BASE_ID")
+share_id = ENV.fetch("SCARETABLE_SHARE_ID")
+
+out_path = File.expand_path("../../data/unified.csv", __FILE__)
+
+url = Scaretable.get_csv_url(base_id, share_id)
+
+$stderr.puts "downloading #{url}"
+
+data = URI.open(url).read
+# strip BOM if present
+data.delete_prefix!("\xEF\xBB\xBF")
+
+File.write(out_path, data)
+$stderr.puts "wrote #{data.bytesize} bytes to #{out_path}"
