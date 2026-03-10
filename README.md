@@ -1,6 +1,6 @@
 # ferret
 
-semantic search for [Hack Club](https://hackclub.com) YSWS projects. it pulls project data from airtable, embeds descriptions into vectors, and lets you search them with a ranking pipeline that's almost good enough?
+semantic search for [Hack Club](https://hackclub.com) Unified YSWS DB projects. it pulls project data from airtable, embeds descriptions into vectors, and lets you search them with a ranking pipeline that's almost good enough?
 
 this is a janky first pass. it works, it's useful, and someone can and should do way better. the concept needs to exist — "what if you could actually find things in the YSWS project database" — and this is the minimum viable execution of that concept.
 
